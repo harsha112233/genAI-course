@@ -1,162 +1,154 @@
+import { GoogleGenAI, Type } from '@google/genai';
+import readlineSync from "readline-sync"
+import 'dotenv/config'
 
-import "dotenv/config";
-import { GoogleGenAI, Type } from "@google/genai";
-import readlineSync from "readline-sync";
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    timeout: 60000,
-    retryOptions: { attempts: 1 },
-  },
-});
 
-const weatherTool = {
-  name: "getWeather",
-  description: "Gets the current weather for a given city in India.",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      cityname: {
-        type: Type.STRING,
-        description: "The city name, such as Solapur or Pune",
-      },
-    },
-    required: ["cityname"],
-  },
-};
+// Configure the client
+const ai = new GoogleGenAI({});
 
-const chat = ai.chats.create({
-  model: "gemini-3.5-flash-lite",
-  config: {
-    temperature: 0.7,
-    tools: [{ functionDeclarations: [weatherTool] }],
-  },
-});
 
-// Actual tool implementation
-async function getWeather({ cityname }) {
-  const url = new URL(
-    "https://api.openweathermap.org/data/2.5/weather"
-  );
+// crypto currency tool
+async function cryptoCurrency({coin}) {
 
-  url.search = new URLSearchParams({
-    q: `${cityname},IN`,
-    appid: process.env.WEATHER_API_KEY,
-    units: "metric",
-  }).toString();
-
-  const response = await fetch(url);
-
+  const response = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=inr&ids=${coin}`);
   const data = await response.json();
-
-  if (!response.ok) {
-    throw new Error(
-      data.message || `Weather API error: ${response.status}`
-    );
-  }
-
-  return {
-    city: data.name,
-    temperature: data.main.temp,
-    feelsLike: data.main.feels_like,
-    condition: data.weather[0]?.description,
-    humidity: data.main.humidity,
-  };
+  return data;
 }
 
-async function getCryptoPrice({ coin }) {
-    const response =await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${coin}&vs_currencies=inr,usd`)
+// weather tool
+
+async function weatherInformation({city}) {
+    const response = await fetch(`http://api.weatherapi.com/v1/current.json?key=${process.env.WEATHER_API_KEY}&q=${city}&aqi=no`);
     const data = await response.json();
-    console.log("data:", data);
-    // return data[coin];
-    
+    // console.log(data);
+
+    return data;
 }
 
 
-const functionMap = {
-  getWeather,
-};
-
-async function askGemini(question) {
-  let response = await chat.sendMessage({
-    message: question,
-  });
 
 
-  // Handle tool calls until Gemini returns a normal answer
-  while (response.functionCalls?.length) {
-    console.log("response.functionCalls:", response.functionCalls);
-    const functionResponses = [];
 
-    for (const call of response.functionCalls) {
-      console.log(`Calling tool: ${call.name}`);
-      console.log("Arguments:", call.args);
+// cryptcurrency wale ki information karke
 
-      const fn = functionMap[call.name];
-
-      if (!fn) {
-        functionResponses.push({
-          functionResponse: {
-            name: call.name,
-            id: call.id,
-            response: { error: "Unknown function" },
-          },
-        });
-        continue;
-      }
-
-      try {
-        // fun(weatherTool({"solapur"}))
-        const result = await fn(call.args);
-
-        functionResponses.push({
-          functionResponse: {
-            name: call.name,
-            id: call.id,
-            response: { result },
-          },
-        });
-      } catch (error) {
-        functionResponses.push({
-          functionResponse: {
-            name: call.name,
-            id: call.id,
-            response: { error: error.message },
-          },
-        });
-      }
+const cryptoInfo = {
+    name:"cryptoCurrency",
+    description: "We can give you the current price or other information related to cryptocurrency like bitcoin and ethereum etc",
+    parameters: {
+        type: Type.OBJECT,
+        properties: {
+            coin:{
+                type:Type.STRING,
+                description: "It will be the name of the cryptocurrency like bitcoin, ethereum, etc"
+            }
+        },
+        required:['coin']
     }
-
-    // Send tool results back to Gemini
-    response = await chat.sendMessage({
-      message: functionResponses,
-    });
-  }
-
-  console.log("\nGemini:", response.text ?? "(No text response)", "\n");
 }
+
+
+const weatherInfo = {
+    name: "weatherInformation",
+    description: "You can get the current weather information of any city like london, goa etc",
+    parameters:{
+        type:Type.OBJECT,
+        properties:{
+            city:{
+                type:Type.STRING,
+                description:"Name of the city for which I have to fetch weather information like london, goa etc"
+            }
+        },
+        required:['city']
+    }
+}
+
+
+const tools = [{
+    functionDeclarations: [cryptoInfo,weatherInfo]
+}];
+
+
+const toolFunctions = {
+    "cryptoCurrency": cryptoCurrency,
+    "weatherInformation":weatherInformation
+}
+
+const History = [];
+
+
 
 async function main() {
   while (true) {
-    const question = readlineSync.question("You: ").trim();
+    const result = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: History,
+      config: { tools },
+    });
 
-    if (question.toLowerCase() === "exit") {
-      console.log("Goodbye!");
+    const functionCalls = result.functionCalls;
+
+    if (functionCalls && functionCalls.length > 0) {
+      console.log("My function is called");
+
+      // IMPORTANT: Preserve the complete model response,
+      // including thought_signature.
+      History.push(result.candidates[0].content);
+
+      // Execute all requested function calls
+      const functionResponses = await Promise.all(
+        functionCalls.map(async (functionCall) => {
+          const { name, args } = functionCall;
+
+          const toolFunction = toolFunctions[name];
+
+          if (!toolFunction) {
+            throw new Error(`Unknown tool: ${name}`);
+          }
+
+          const response = await toolFunction(args);
+
+          return {
+            functionResponse: {
+              name,
+              response: {
+                result: response,
+              },
+            },
+          };
+        })
+      );
+
+      // Send function responses back to Gemini
+      History.push({
+        role: "user",
+        parts: functionResponses,
+      });
+
+    } else {
+      // Preserve complete model response
+      History.push(result.candidates[0].content);
+
+      console.log(result.text);
       break;
-    }
-
-    if (!question) continue;
-
-    try {
-      console.time("API response");
-      await askGemini(question);
-    } catch (error) {
-      console.error("Error:", error.message);
-    } finally {
-      console.timeEnd("API response");
     }
   }
 }
 
-main();
+
+
+while(true){
+    
+    const question = readlineSync.question('Ask me anything: ');
+
+    if(question == 'exit'){
+        break;
+    }
+
+    History.push({
+        role:'user',
+        parts:[{text:question}]
+    });
+
+    await main();
+}
